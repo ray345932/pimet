@@ -570,28 +570,24 @@ public final class ProotManager {
             // 3) apt 换阿里云源，补装 git / ca-certificates / curl（失败不致命）
             writeDomesticAptConfig(rootfsDir, isX86, true);
             ensureContainerDns(context);
-            if (cb != null) cb.onProgress("正在从阿里云安装 git 等基础工具...", 68);
-            int rc = runInContainer(context,
-                    "export DEBIAN_FRONTEND=noninteractive; apt-get update -o Acquire::Retries=2 && " +
-                    "apt-get install -y --no-install-recommends -o Acquire::Retries=2 git ca-certificates curl xz-utils procps && " +
-                    "apt-get clean && rm -rf /var/lib/apt/lists/*",
-                    5 * 60 * 1000L, new LineSink() {
-                        long last = 0;
-                        int step = 0;
-                        @Override public void onLine(String line) {
-                            if (cb == null || line == null) return;
-                            String t = line.trim();
-                            if (t.isEmpty()) return;
-                            if (t.startsWith("Setting up") || t.startsWith("Unpacking")) step++;
-                            long now = System.currentTimeMillis();
-                            if (now - last < 400) return;
-                            last = now;
-                            cb.onProgress("安装基础工具: " + (t.length() > 60 ? t.substring(0, 60) : t), Math.min(92, 70 + step));
-                        }
-                    });
-            Log.i(TAG, "domestic apt install rc=" + rc);
-            // 装完写回完整源（有证书则用 https），以后用户 apt install 也走阿里云
-            writeDomesticAptConfig(rootfsDir, isX86, false);
+            // git/curl 等基础工具放到后台装，不挡容器就绪和 Pi-Web 安装（pi-web 本身不依赖它们）
+            final Context appCtx = context.getApplicationContext();
+            final File rootfsFinal = rootfsDir;
+            final boolean x86Final = isX86;
+            new Thread(() -> {
+                try {
+                    int rc = runInContainer(appCtx,
+                            "export DEBIAN_FRONTEND=noninteractive; apt-get update -o Acquire::Retries=2 && " +
+                            "apt-get install -y --no-install-recommends -o Acquire::Retries=2 git ca-certificates curl xz-utils procps && " +
+                            "apt-get clean && rm -rf /var/lib/apt/lists/*",
+                            20 * 60 * 1000L, null);
+                    Log.i(TAG, "background apt install rc=" + rc);
+                    writeDomesticAptConfig(rootfsFinal, x86Final, false);
+                    if (rc == 0) new File(rootfsFinal, "etc/pimet-base-tools-ok").createNewFile();
+                } catch (Throwable t) {
+                    Log.w(TAG, "background apt failed", t);
+                }
+            }, "pimet-apt-bg").start();
 
             new File(rootfsDir, "etc/pimet-domestic-rootfs").createNewFile();
             if (cb != null) cb.onProgress("国内源容器安装完成", 95);
